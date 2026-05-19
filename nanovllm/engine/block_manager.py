@@ -6,10 +6,11 @@ from nanovllm.engine.sequence import Sequence
 
 
 class Block:
-
+    # [Backend Analogy]: 类似于操作系统中的物理内存页 (Physical Page)。
+    # 这里存储的是大模型计算过程中的 KV Cache。
     def __init__(self, block_id):
         self.block_id = block_id
-        self.ref_count = 0
+        self.ref_count = 0  # 引用计数，用于内存回收
         self.hash = -1
         self.token_ids = []
 
@@ -24,12 +25,17 @@ class Block:
 
 
 class BlockManager:
-
+    # [Backend Analogy]: 类似于操作系统的内存池管理器 (Memory Pool Manager)。
+    # 它负责把连续的请求打散分配到不连续的物理 Block 中 (PagedAttention 核心思想)，
+    # 彻底解决显存碎片化的问题。
     def __init__(self, num_blocks: int, block_size: int):
         self.block_size = block_size
         self.blocks: list[Block] = [Block(i) for i in range(num_blocks)]
         self.hash_to_block_id: dict[int, int] = dict()
+        
+        # 空闲的 block 列表 (类似 free page list)
         self.free_block_ids: deque[int] = deque(range(num_blocks))
+        # 已使用的 block 集合
         self.used_block_ids: set[int] = set()
 
     @classmethod

@@ -4,6 +4,8 @@ import torch
 
 @dataclass(slots=True)
 class Context:
+    # [Backend Analogy]: 类似于 Web 框架中的 ThreadLocal 或 Request Context。
+    # 由于 Triton/CUDA kernel 经常需要拿到全局的状态，通过 Context 透传避免了在每一层方法调用中都塞满参数。
     is_prefill: bool = False
     cu_seqlens_q: torch.Tensor | None = None
     cu_seqlens_k: torch.Tensor | None = None

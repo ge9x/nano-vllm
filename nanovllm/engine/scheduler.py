@@ -13,7 +13,11 @@ class Scheduler:
         self.eos = config.eos
         self.block_size = config.kvcache_block_size
         self.block_manager = BlockManager(config.num_kvcache_blocks, config.kvcache_block_size)
+        
+        # [Backend Analogy]: 类似于操作系统的任务队列。
+        # waiting 队列：存放刚接收到，还未分配资源的请求 (类似就绪队列)
         self.waiting: deque[Sequence] = deque()
+        # running 队列：存放正在生成 token 的请求 (类似运行队列)
         self.running: deque[Sequence] = deque()
 
     def is_finished(self):
@@ -26,7 +30,8 @@ class Scheduler:
         scheduled_seqs = []
         num_batched_tokens = 0
 
-        # prefill
+        # prefill (预填充阶段)：处理新的请求。
+        # [Backend Analogy]: 类似处理刚到达的请求，需要分配大量的计算资源（Token）。
         while self.waiting and len(scheduled_seqs) < self.max_num_seqs:
             seq = self.waiting[0]
             remaining = self.max_num_batched_tokens - num_batched_tokens
@@ -54,7 +59,10 @@ class Scheduler:
         if scheduled_seqs:
             return scheduled_seqs, True
 
-        # decode
+        # decode (解码阶段)：处理正在生成的请求。
+        # [Backend Analogy]: 类似流式返回结果。这是 Continuous Batching (持续批处理) 的核心：
+        # 只要有空闲资源，就让 running 队列里的请求继续生成下一个 token，
+        # 而不是等所有请求都处理完了再一起返回。
         while self.running and len(scheduled_seqs) < self.max_num_seqs:
             seq = self.running.popleft()
             while not self.block_manager.can_append(seq):
@@ -73,6 +81,9 @@ class Scheduler:
         return scheduled_seqs, False
 
     def preempt(self, seq: Sequence):
+        # [Backend Analogy]: 抢占 (Preemption)。
+        # 当显存 (KV Cache 空间) 不足时，强制将当前请求暂停，释放其持有的物理内存块，
+        # 并把它放回 waiting 队列的头部，等待下次资源充足时重新调度。
         seq.status = SequenceStatus.WAITING
         seq.is_prefill = True
         self.block_manager.deallocate(seq)

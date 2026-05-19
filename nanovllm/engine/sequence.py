@@ -5,12 +5,15 @@ from itertools import count
 from nanovllm.sampling_params import SamplingParams
 
 
+# [Backend Analogy]: 任务状态机
 class SequenceStatus(Enum):
-    WAITING = auto()
-    RUNNING = auto()
-    FINISHED = auto()
+    WAITING = auto()  # 等待调度 (就绪态)
+    RUNNING = auto()  # 正在 GPU 上执行 (运行态)
+    FINISHED = auto() # 生成完成 (终止态)
 
 
+# [Backend Analogy]: 类似于操作系统的任务控制块 (Task Control Block, TCB) 或请求上下文 (Request Context)。
+# 这里保存了单个请求的全部生命周期状态，包括它持有哪些物理内存块的映射关系。
 class Sequence:
     block_size = 256
     counter = count()
@@ -25,6 +28,9 @@ class Sequence:
         self.num_cached_tokens = 0
         self.num_scheduled_tokens = 0
         self.is_prefill = True
+        
+        # [Backend Analogy]: 页表 (Page Table)。
+        # 记录逻辑上的 Token Block 映射到了 BlockManager 里的哪些物理 Block ID。
         self.block_table = []
         self.temperature = sampling_params.temperature
         self.max_tokens = sampling_params.max_tokens

@@ -10,6 +10,8 @@ def default_weight_loader(param: nn.Parameter, loaded_weight: torch.Tensor):
 
 
 def load_model(model: nn.Module, path: str):
+    # [Backend Analogy]: 类似于 ORM (Object-Relational Mapping)。
+    # 从磁盘 (safetensors 文件) 读取模型权重，并将它们映射注入到内存中的神经网络对象属性中。
     packed_modules_mapping = getattr(model, "packed_modules_mapping", {})
     for file in glob(os.path.join(path, "*.safetensors")):
         with safe_open(file, "pt", "cpu") as f:

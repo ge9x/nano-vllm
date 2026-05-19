@@ -15,7 +15,9 @@ def apply_rotary_emb(
 
 
 class RotaryEmbedding(nn.Module):
-
+    # [Backend Analogy]: 类似于在网络数据包 (Packet) 中打上“序列号” (Sequence Number) 或时间戳。
+    # 因为 Transformer 本身没有顺序概念，RoPE 用旋转矩阵给每个 Token 加上它的绝对位置信息，
+    # 并且能够优雅地表达相对位置。
     def __init__(
         self,
         head_size: int,

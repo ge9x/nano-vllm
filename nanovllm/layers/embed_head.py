@@ -7,7 +7,8 @@ from nanovllm.utils.context import get_context
 
 
 class VocabParallelEmbedding(nn.Module):
-
+    # [Backend Analogy]: 类似于按照 UserID (或者这里的 Vocab ID) 进行分库分表。
+    # 词表 (Vocabulary) 非常大，将其均匀分配到不同的 GPU 上，每个 GPU 只保存一部分词的 Embedding。
     def __init__(
         self,
         num_embeddings: int,
@@ -43,7 +44,9 @@ class VocabParallelEmbedding(nn.Module):
 
 
 class ParallelLMHead(VocabParallelEmbedding):
-
+    # [Backend Analogy]: 聚合网关 (API Gateway / Aggregator)。
+    # 最后一层，每张 GPU 计算出自己负责的那部分词汇的概率分布，
+    # 0号进程 (类似于主节点) 会把所有 GPU 的结果 gather 收集起来，拼成完整的概率分布。
     def __init__(
         self,
         num_embeddings: int,

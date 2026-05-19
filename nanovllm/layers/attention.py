@@ -7,6 +7,9 @@ from flash_attn import flash_attn_varlen_func, flash_attn_with_kvcache
 from nanovllm.utils.context import get_context
 
 
+# [Backend Analogy]: 类似于自己写了一段嵌入式的汇编代码。
+# Triton 允许用 Python 语法写 GPU 底层算子 (Kernel)。
+# 这里的 kernel 是为了把当前计算出的 Key/Value 写回到 BlockManager 分配的离散物理显存块中。
 @triton.jit
 def store_kvcache_kernel(
     key_ptr,
@@ -61,6 +64,9 @@ class Attention(nn.Module):
         k_cache, v_cache = self.k_cache, self.v_cache
         if k_cache.numel() and v_cache.numel():
             store_kvcache(k, v, k_cache, v_cache, context.slot_mapping)
+            
+        # [Backend Analogy]: FlashAttention 是目前最高效的注意力加速库。
+        # 这里区分了 prefill (一次性计算大量新 token) 和 decode (每次只增加一个 token)。
         if context.is_prefill:
             if context.block_tables is not None:    # prefix cache
                 k, v = k_cache, v_cache

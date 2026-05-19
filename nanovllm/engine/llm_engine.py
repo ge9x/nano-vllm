@@ -21,16 +21,24 @@ class LLMEngine:
         Sequence.block_size = config.kvcache_block_size
         self.ps = []
         self.events = []
+        
+        # [Backend Analogy]: 类似于 Nginx 的 Master-Worker 多进程架构。
+        # 为了支持多 GPU 张量并行 (Tensor Parallelism)，启动多个子进程。
         ctx = mp.get_context("spawn")
         for i in range(1, config.tensor_parallel_size):
             event = ctx.Event()
+            # ModelRunner 是实际跑在 GPU 上的执行器
             process = ctx.Process(target=ModelRunner, args=(config, i, event))
             process.start()
             self.ps.append(process)
             self.events.append(event)
+            
+        # 主进程自己也跑一个 ModelRunner (rank 0)
         self.model_runner = ModelRunner(config, 0, self.events)
         self.tokenizer = AutoTokenizer.from_pretrained(config.model, use_fast=True)
         config.eos = self.tokenizer.eos_token_id
+        
+        # [Backend Analogy]: 核心调度器，类似于微服务网关中的流量分配器。
         self.scheduler = Scheduler(config)
         atexit.register(self.exit)
 
@@ -47,10 +55,16 @@ class LLMEngine:
         self.scheduler.add(seq)
 
     def step(self):
+        # 1. 调度：从队列中挑选一批请求 (决定谁能上 GPU 执行)
         seqs, is_prefill = self.scheduler.schedule()
         num_tokens = sum(seq.num_scheduled_tokens for seq in seqs) if is_prefill else -len(seqs)
+        
+        # 2. 执行：调用 ModelRunner 触发一次神经网络的前向传播
         token_ids = self.model_runner.call("run", seqs, is_prefill)
+        
+        # 3. 后处理：将生成的 Token 存入请求的状态中，并判断请求是否结束，如果结束则释放内存
         self.scheduler.postprocess(seqs, token_ids, is_prefill)
+        
         outputs = [(seq.seq_id, seq.completion_token_ids) for seq in seqs if seq.is_finished]
         return outputs, num_tokens
 

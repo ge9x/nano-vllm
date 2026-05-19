@@ -23,6 +23,8 @@ class ModelRunner:
         self.rank = rank
         self.event = event
 
+        # [Backend Analogy]: 类似于微服务间的 RPC 初始化。
+        # 使用 NCCL 后端建立进程间通信群组，这样多张 GPU 之间就可以进行 All-Reduce 等数据同步。
         dist.init_process_group("nccl", "tcp://localhost:2333", world_size=self.world_size, rank=rank)
         torch.cuda.set_device(rank)
         default_dtype = torch.get_default_dtype()
@@ -39,13 +41,15 @@ class ModelRunner:
         torch.set_default_dtype(default_dtype)
 
         if self.world_size > 1:
+            # [Backend Analogy]: 进程间通信 (IPC) 的极致优化。
+            # 采用 SharedMemory (共享内存) 传递控制指令和数据，避免了走网络或套接字带来的序列化/反序列化开销。
             if rank == 0:
                 self.shm = SharedMemory(name="nanovllm", create=True, size=2**20)
                 dist.barrier()
             else:
                 dist.barrier()
                 self.shm = SharedMemory(name="nanovllm")
-                self.loop()
+                self.loop()  # 子进程进入事件循环，类似 Worker 进程挂起等待任务
 
     def exit(self):
         if self.world_size > 1:
@@ -109,7 +113,9 @@ class ModelRunner:
         current = torch.cuda.memory_stats()["allocated_bytes.all.current"]
         num_kv_heads = hf_config.num_key_value_heads // self.world_size
         head_dim = getattr(hf_config, "head_dim", hf_config.hidden_size // hf_config.num_attention_heads)
-        block_bytes = 2 * hf_config.num_hidden_layers * self.block_size * num_kv_heads * head_dim * hf_config.dtype.itemsize
+        # [Backend Analogy]: 静态内存池预分配 (Pre-allocation)。
+        # 根据当前 GPU 剩余显存，计算出能容纳多少个 KV Block，并一次性申请好。
+        # 运行时就不再向 OS 申请内存，完全自己管理 (BlockManager)，避免 OutOfMemory 和分配开销。
         config.num_kvcache_blocks = int(total * config.gpu_memory_utilization - used - peak + current) // block_bytes
         assert config.num_kvcache_blocks > 0
         self.kv_cache = torch.empty(2, hf_config.num_hidden_layers, config.num_kvcache_blocks, self.block_size, num_kv_heads, head_dim)
@@ -221,6 +227,10 @@ class ModelRunner:
 
     @torch.inference_mode()
     def capture_cudagraph(self):
+        # [Backend Analogy]: 类似于数据库的“执行计划缓存” (Prepared Statements)。
+        # GPU 执行小 batch 推理时，CPU 下发指令的开销(Kernel Launch Overhead) 会成为瓶颈。
+        # CUDA Graph 把一系列的 GPU 指令打包成一个图“录制”下来。
+        # 之后每次执行只需发送一次重播 (Replay) 信号，极大降低 CPU 侧的调度延迟。
         config = self.config
         hf_config = config.hf_config
         max_bs = min(self.config.max_num_seqs, 512)

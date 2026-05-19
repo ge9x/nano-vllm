@@ -3,7 +3,8 @@ from torch import nn
 
 
 class RMSNorm(nn.Module):
-
+    # [Backend Analogy]: 类似于监控系统里的“数据标准化处理” (Data Normalization)。
+    # 防止因为模型层数太深，数值变得太大或太小导致梯度爆炸/消失。
     def __init__(
         self,
         hidden_size: int,

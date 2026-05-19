@@ -52,7 +52,8 @@ class ReplicatedLinear(LinearBase):
 
 
 class ColumnParallelLinear(LinearBase):
-
+    # [Backend Analogy]: 类似于数据库的“垂直分表” (Column-based Sharding)。
+    # 权重矩阵按列切分，每张 GPU 只加载并计算自己负责的那几列。
     def __init__(
         self,
         input_size: int,
@@ -129,7 +130,9 @@ class QKVParallelLinear(ColumnParallelLinear):
 
 
 class RowParallelLinear(LinearBase):
-
+    # [Backend Analogy]: 类似于数据库的“水平分表” (Row-based Sharding)。
+    # 权重矩阵按行切分。每张 GPU 计算出一部分结果后，
+    # 需要通过 All-Reduce (就像 MapReduce 里的 Reduce 阶段) 把所有 GPU 的结果加起来。
     def __init__(
         self,
         input_size: int,

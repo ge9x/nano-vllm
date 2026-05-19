@@ -12,6 +12,9 @@ from nanovllm.layers.embed_head import VocabParallelEmbedding, ParallelLMHead
 
 
 class Qwen3Attention(nn.Module):
+    # [Backend Analogy]: 注意力机制可以看作是一个“分布式路由/匹配系统”。
+    # Query (Q) 是当前的请求特征，Key (K) 是历史请求的索引，Value (V) 是历史请求的具体内容。
+    # Attention 就是拿 Q 去匹配所有的 K，计算出权重，然后把 V 加权求和返回。
 
     def __init__(
         self,
@@ -26,6 +29,8 @@ class Qwen3Attention(nn.Module):
         rope_scaling: dict | None = None,
     ) -> None:
         super().__init__()
+        # [Backend Analogy]: Tensor Parallelism (张量并行) 就像数据库的垂直分表。
+        # 把巨大的注意力头 (Attention Heads) 切分到多张 GPU 上分别计算，最后再合并 (All-Reduce)。
         tp_size = dist.get_world_size()
         self.total_num_heads = num_heads
         assert self.total_num_heads % tp_size == 0
@@ -118,7 +123,10 @@ class Qwen3MLP(nn.Module):
 
 
 class Qwen3DecoderLayer(nn.Module):
-
+    # [Backend Analogy]: 这是一个标准的 Transformer 处理流水线 (Pipeline)。
+    # 数据流向：Input -> RMSNorm -> Attention -> RMSNorm -> MLP -> Output
+    # 就像请求经过一系列中间件处理。
+    
     def __init__(
         self,
         config: Qwen3Config,
@@ -140,6 +148,7 @@ class Qwen3DecoderLayer(nn.Module):
             intermediate_size=config.intermediate_size,
             hidden_act=config.hidden_act,
         )
+        # 归一化层，保证数值稳定性
         self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
@@ -213,4 +222,7 @@ class Qwen3ForCausalLM(nn.Module):
         self,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
+        # [Backend Analogy]: 最终的打分器 (Scorer) 或负载均衡器的哈希计算。
+        # 把模型输出的隐含特征，映射成词表中每一个词的概率分布 (Logits)。
+        # 然后交给 Sampler (采样器) 决定到底吐出哪一个字。
         return self.lm_head(hidden_states)
