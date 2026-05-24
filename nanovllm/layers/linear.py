@@ -1,7 +1,6 @@
 import torch
 from torch import nn
 import torch.nn.functional as F
-import torch.distributed as dist
 
 
 def divide(numerator, denominator):
@@ -20,8 +19,8 @@ class LinearBase(nn.Module):
     ):
         super().__init__()
         self.tp_dim = tp_dim
-        self.tp_rank = dist.get_rank()
-        self.tp_size = dist.get_world_size()
+        self.tp_rank = 0
+        self.tp_size = 1
         self.weight = nn.Parameter(torch.empty(output_size, input_size))
         self.weight.weight_loader = self.weight_loader
         if bias:
@@ -52,15 +51,14 @@ class ReplicatedLinear(LinearBase):
 
 
 class ColumnParallelLinear(LinearBase):
-    # [Backend Analogy]: 类似于数据库的“垂直分表” (Column-based Sharding)。
-    # 权重矩阵按列切分，每张 GPU 只加载并计算自己负责的那几列。
+    # MPS 版本保留原类名，内部按单设备完整权重执行。
     def __init__(
         self,
         input_size: int,
         output_size: int,
         bias: bool = False,
     ):
-        tp_size = dist.get_world_size()
+        tp_size = 1
         super().__init__(input_size, divide(output_size, tp_size), bias, 0)
 
     def weight_loader(self, param: nn.Parameter, loaded_weight: torch.Tensor):
@@ -104,7 +102,7 @@ class QKVParallelLinear(ColumnParallelLinear):
         total_num_kv_heads: int | None = None,
         bias: bool = False,
     ):
-        tp_size = dist.get_world_size()
+        tp_size = 1
         total_num_kv_heads = total_num_kv_heads or total_num_heads
         self.head_size = head_size
         self.num_heads = divide(total_num_heads, tp_size)
@@ -130,16 +128,14 @@ class QKVParallelLinear(ColumnParallelLinear):
 
 
 class RowParallelLinear(LinearBase):
-    # [Backend Analogy]: 类似于数据库的“水平分表” (Row-based Sharding)。
-    # 权重矩阵按行切分。每张 GPU 计算出一部分结果后，
-    # 需要通过 All-Reduce (就像 MapReduce 里的 Reduce 阶段) 把所有 GPU 的结果加起来。
+    # MPS 版本保留原类名，内部按单设备完整权重执行。
     def __init__(
         self,
         input_size: int,
         output_size: int,
         bias: bool = False,
     ):
-        tp_size = dist.get_world_size()
+        tp_size = 1
         super().__init__(divide(input_size, tp_size), output_size, bias, 1)
 
     def weight_loader(self, param: nn.Parameter, loaded_weight: torch.Tensor):
@@ -154,6 +150,4 @@ class RowParallelLinear(LinearBase):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         y = F.linear(x, self.weight, self.bias if self.tp_rank == 0 else None)
-        if self.tp_size > 1:
-            dist.all_reduce(y)
         return y

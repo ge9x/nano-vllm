@@ -10,8 +10,8 @@ def main():
     # Tokenizer 负责把人类可读的字符串 (String) 编码成模型认识的数字 ID 数组 (Tokens)。
     tokenizer = AutoTokenizer.from_pretrained(path)
     
-    # [Backend Analogy]: 类似于初始化整个后台微服务 (启动 Scheduler，分配内存池，拉起 Worker 进程)。
-    llm = LLM(path, enforce_eager=True, tensor_parallel_size=1)
+    # [Backend Analogy]: 类似于初始化整个后台微服务 (启动 Scheduler，分配内存池)。
+    llm = LLM(path, enforce_eager=True)
 
     # [Backend Analogy]: 请求配置参数 (Request Options)。
     # 控制生成策略：temperature 控制随机性，max_tokens 类似 max_response_length。

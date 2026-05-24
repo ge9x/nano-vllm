@@ -1,6 +1,5 @@
 import torch
 from torch import nn
-import torch.distributed as dist
 from transformers import Qwen3Config
 
 from nanovllm.layers.activation import SiluAndMul
@@ -29,9 +28,7 @@ class Qwen3Attention(nn.Module):
         rope_scaling: dict | None = None,
     ) -> None:
         super().__init__()
-        # [Backend Analogy]: Tensor Parallelism (张量并行) 就像数据库的垂直分表。
-        # 把巨大的注意力头 (Attention Heads) 切分到多张 GPU 上分别计算，最后再合并 (All-Reduce)。
-        tp_size = dist.get_world_size()
+        tp_size = 1
         self.total_num_heads = num_heads
         assert self.total_num_heads % tp_size == 0
         self.num_heads = self.total_num_heads // tp_size

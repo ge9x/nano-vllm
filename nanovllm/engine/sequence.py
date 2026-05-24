@@ -8,7 +8,7 @@ from nanovllm.sampling_params import SamplingParams
 # [Backend Analogy]: 任务状态机
 class SequenceStatus(Enum):
     WAITING = auto()  # 等待调度 (就绪态)
-    RUNNING = auto()  # 正在 GPU 上执行 (运行态)
+    RUNNING = auto()  # 正在 MPS 设备上执行 (运行态)
     FINISHED = auto() # 生成完成 (终止态)
 
 

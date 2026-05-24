@@ -12,11 +12,9 @@ class Config:
     max_num_seqs: int = 512
     # [Backend Analogy]: 单个请求的最大超时/长度限制。
     max_model_len: int = 4096
-    # [Backend Analogy]: JVM 的 -Xmx，控制内存池 (KV Cache) 最多能占用多少 GPU 显存。
-    gpu_memory_utilization: float = 0.9
-    # [Backend Analogy]: 分库分表的节点数 (分布式推理使用的 GPU 数量)。
-    tensor_parallel_size: int = 1
-    # 是否强制禁用 CUDA Graph (执行计划缓存)
+    # [Backend Analogy]: 控制内存池 (KV Cache) 最多能占用多少统一内存。
+    gpu_memory_utilization: float = 0.3
+    # MPS 后端始终使用 eager 执行
     enforce_eager: bool = False
     hf_config: AutoConfig | None = None
     eos: int = -1
@@ -26,6 +24,5 @@ class Config:
     def __post_init__(self):
         assert os.path.isdir(self.model)
         assert self.kvcache_block_size % 256 == 0
-        assert 1 <= self.tensor_parallel_size <= 8
         self.hf_config = AutoConfig.from_pretrained(self.model)
         self.max_model_len = min(self.max_model_len, self.hf_config.max_position_embeddings)

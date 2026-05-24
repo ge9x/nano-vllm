@@ -3,7 +3,6 @@ from dataclasses import fields
 from time import perf_counter
 from tqdm.auto import tqdm
 from transformers import AutoTokenizer
-import torch.multiprocessing as mp
 
 from nanovllm.config import Config
 from nanovllm.sampling_params import SamplingParams
@@ -19,22 +18,7 @@ class LLMEngine:
         config_kwargs = {k: v for k, v in kwargs.items() if k in config_fields}
         config = Config(model, **config_kwargs)
         Sequence.block_size = config.kvcache_block_size
-        self.ps = []
-        self.events = []
-        
-        # [Backend Analogy]: 类似于 Nginx 的 Master-Worker 多进程架构。
-        # 为了支持多 GPU 张量并行 (Tensor Parallelism)，启动多个子进程。
-        ctx = mp.get_context("spawn")
-        for i in range(1, config.tensor_parallel_size):
-            event = ctx.Event()
-            # ModelRunner 是实际跑在 GPU 上的执行器
-            process = ctx.Process(target=ModelRunner, args=(config, i, event))
-            process.start()
-            self.ps.append(process)
-            self.events.append(event)
-            
-        # 主进程自己也跑一个 ModelRunner (rank 0)
-        self.model_runner = ModelRunner(config, 0, self.events)
+        self.model_runner = ModelRunner(config)
         self.tokenizer = AutoTokenizer.from_pretrained(config.model, use_fast=True)
         config.eos = self.tokenizer.eos_token_id
         
@@ -45,8 +29,6 @@ class LLMEngine:
     def exit(self):
         self.model_runner.call("exit")
         del self.model_runner
-        for p in self.ps:
-            p.join()
 
     def add_request(self, prompt: str | list[int], sampling_params: SamplingParams):
         if isinstance(prompt, str):
@@ -55,7 +37,7 @@ class LLMEngine:
         self.scheduler.add(seq)
 
     def step(self):
-        # 1. 调度：从队列中挑选一批请求 (决定谁能上 GPU 执行)
+        # 1. 调度：从队列中挑选一批请求 (决定谁能上 MPS 设备执行)
         seqs, is_prefill = self.scheduler.schedule()
         num_tokens = sum(seq.num_scheduled_tokens for seq in seqs) if is_prefill else -len(seqs)
         

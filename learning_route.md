@@ -13,7 +13,7 @@
 1. **大模型推理的两种形态**：
    - **Prefill (预填充)**：处理用户的 prompt，是一次性计算大量 token。相当于“初始化”。
    - **Decode (解码)**：自回归生成，每次根据前面的内容生成下一个 token。相当于“流式响应”。
-2. **理解痛点**：为什么普通的 PyTorch `model.generate()` 慢？为什么需要 vLLM？（内存碎片、GPU 显存利用率低、无法高效 Batching）。
+2. **理解痛点**：为什么普通的 PyTorch `model.generate()` 慢？为什么需要 vLLM？（内存碎片、MPS 统一内存利用率低、无法高效 Batching）。
 3. **阅读入口代码**：
    - 查看 `example.py`，了解它是如何初始化的。
    - 追踪 `nanovllm/llm.py`，了解引擎 (`LLMEngine`) 是如何接受请求并驱动生成的。
@@ -36,34 +36,33 @@
 
 ---
 
-## 阶段三：张量并行与进程间通信 (分布式系统)
+## 阶段三：MPS 执行器与模型前向传播
 
-**目标**：理解大模型如何拆分到多张 GPU 上运行（Tensor Parallelism）。
+**目标**：理解大模型如何在 Apple Metal 后端上以单设备方式运行。
 
-1. **多进程模型 (Multiprocessing)**：
-   - 文章提到 `nano-vLLM` 使用 Python 的 `multiprocessing` 启动多个 Worker（而不是 RPC）。
-   - **后端映射**：类似 Nginx 的 Master-Worker 架构。
-2. **SharedMemory 通信**：
-   - Worker 之间如何同步数据？了解它是如何利用共享内存 (`multiprocessing.shared_memory`) 传递输入数据的。
+1. **单执行器模型**：
+   - MPS 分支使用单进程 `ModelRunner`，避免多设备同步与跨进程通信复杂度。
+   - **后端映射**：类似一个独立工作进程承接调度器发来的批处理任务。
+2. **统一内存与 KV Cache**：
+   - 关注 `torch.mps.recommended_max_memory()` 与预分配 KV Cache 的关系。
 3. **深入代码**：
    - 重点查看 `nanovllm/engine/model_runner.py`。
-   - 理解矩阵乘法是如何被切块 (Shard) 分发到不同的 GPU 上，然后通过 `All-Reduce` 操作合并结果的。
+   - 理解输入张量、位置编码和 KV Cache 如何被放到 `mps` 设备上执行。
 
 ---
 
 ## 阶段四：深入模型与算子 (探索深度学习)
 
-**目标**：剥开 Transformer 的黑盒，了解自定义 CUDA kernel（Triton）的作用。
+**目标**：剥开 Transformer 的黑盒，了解纯 PyTorch 注意力如何适配 MPS。
 
 1. **Qwen 模型结构**：
    - 大致了解 `Qwen` 模型的结构，特别是它的注意力机制（Attention）。
    - 查看 `nanovllm/models/` 目录，看权重是如何被加载 (safetensors) 并映射到 PyTorch 层的。
-2. **KV Cache 与 FlashAttention**：
+2. **KV Cache 与注意力计算**：
    - **KV Cache**：就是空间换时间，把历史计算出的 Key 和 Value 缓存下来，避免 Decode 阶段重复计算。
-   - **FlashAttention**：一种硬件友好（Hardware-aware）的加速算法，减少 GPU HBM 和 SRAM 之间的数据搬运。
-3. **Triton 自定义算子**：
-   - 文章提到了为了 Paged KV Cache 编写了自定义的 Triton kernel（而不是 C++ CUDA）。
-   - 查看 `nanovllm/layers/` 里的 triton kernel 代码。Triton 是类 Python 语法，对于后端工程师来说，这是一种学习 GPU 并发编程（Thread block, Grid）的极佳切入点。
+   - **Scaled Dot-Product Attention**：MPS 分支使用 PyTorch 原生接口完成注意力计算，优先保证可运行性和可读性。
+3. **分页 KV Cache 写入**：
+   - 查看 `nanovllm/layers/attention.py`，理解逻辑 token 如何通过 block table 映射到物理 KV Cache 槽位。
 
 ---
 
@@ -71,7 +70,7 @@
 
 **目标**：让代码跑起来，并通过断点和打日志验证认知。
 
-1. **环境搭建**：安装必要的依赖（PyTorch, Triton, FlashAttention 等）。
+1. **环境搭建**：使用 `environment-mps.yml` 创建 conda 环境，并安装 PyTorch、Transformers、xxhash。
 2. **单步调试**：
    - 在 `LLMEngine.step()` 里打断点。
    - 走通一个请求从进入队列 -> 物理块分配 -> Model Runner 前向传播 -> 采样 (Sampling) 的全生命周期。

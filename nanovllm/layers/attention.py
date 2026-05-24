@@ -1,46 +1,57 @@
 import torch
 from torch import nn
-import triton
-import triton.language as tl
-
-from flash_attn import flash_attn_varlen_func, flash_attn_with_kvcache
+import torch.nn.functional as F
 from nanovllm.utils.context import get_context
 
 
-# [Backend Analogy]: 类似于自己写了一段嵌入式的汇编代码。
-# Triton 允许用 Python 语法写 GPU 底层算子 (Kernel)。
-# 这里的 kernel 是为了把当前计算出的 Key/Value 写回到 BlockManager 分配的离散物理显存块中。
-@triton.jit
-def store_kvcache_kernel(
-    key_ptr,
-    key_stride,
-    value_ptr,
-    value_stride,
-    k_cache_ptr,
-    v_cache_ptr,
-    slot_mapping_ptr,
-    D: tl.constexpr,
-):
-    idx = tl.program_id(0)
-    slot = tl.load(slot_mapping_ptr + idx)
-    if slot == -1: return
-    key_offsets = idx * key_stride + tl.arange(0, D)
-    value_offsets = idx * value_stride + tl.arange(0, D)
-    key = tl.load(key_ptr + key_offsets)
-    value = tl.load(value_ptr + value_offsets)
-    cache_offsets = slot * D + tl.arange(0, D)
-    tl.store(k_cache_ptr + cache_offsets, key)
-    tl.store(v_cache_ptr + cache_offsets, value)
-
-
 def store_kvcache(key: torch.Tensor, value: torch.Tensor, k_cache: torch.Tensor, v_cache: torch.Tensor, slot_mapping: torch.Tensor):
-    N, num_heads, head_dim = key.shape
-    D = num_heads * head_dim
-    assert key.stride(-1) == 1 and value.stride(-1) == 1
-    assert key.stride(1) == head_dim and value.stride(1) == head_dim
-    assert k_cache.stride(1) == D and v_cache.stride(1) == D
-    assert slot_mapping.numel() == N
-    store_kvcache_kernel[(N,)](key, key.stride(0), value, value.stride(0), k_cache, v_cache, slot_mapping, D)
+    valid = slot_mapping >= 0
+    k_cache = k_cache.view(-1, *k_cache.shape[2:])
+    v_cache = v_cache.view(-1, *v_cache.shape[2:])
+    k_cache[slot_mapping[valid].long()] = key[valid]
+    v_cache[slot_mapping[valid].long()] = value[valid]
+
+
+def repeat_kv(x: torch.Tensor, num_heads: int) -> torch.Tensor:
+    if x.size(1) == num_heads:
+        return x
+    return x.repeat_interleave(num_heads // x.size(1), dim=1)
+
+
+def varlen_attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, context, scale: float):
+    outputs = []
+    cu_seqlens_q = context.cu_seqlens_q_cpu
+    cu_seqlens_k = context.cu_seqlens_k_cpu
+    for i in range(len(cu_seqlens_q) - 1):
+        qs, qe = cu_seqlens_q[i], cu_seqlens_q[i + 1]
+        ks, ke = cu_seqlens_k[i], cu_seqlens_k[i + 1]
+        qi = q[qs:qe].transpose(0, 1).unsqueeze(0)
+        ki = k[ks:ke].transpose(0, 1).unsqueeze(0)
+        vi = v[ks:ke].transpose(0, 1).unsqueeze(0)
+        qi, ki, vi = repeat_kv(qi, qi.size(1)), repeat_kv(ki, qi.size(1)), repeat_kv(vi, qi.size(1))
+        mask = torch.ones(qe - qs, ke - ks, dtype=torch.bool, device=q.device).tril(diagonal=ke - ks - (qe - qs))
+        out = F.scaled_dot_product_attention(qi, ki, vi, attn_mask=mask, scale=scale)
+        outputs.append(out.squeeze(0).transpose(0, 1))
+    return torch.cat(outputs, dim=0)
+
+
+def paged_attention(q: torch.Tensor, k_cache: torch.Tensor, v_cache: torch.Tensor, context, scale: float):
+    block_size = k_cache.shape[1]
+    k_cache = k_cache.view(-1, *k_cache.shape[2:])
+    v_cache = v_cache.view(-1, *v_cache.shape[2:])
+    
+    slots, mask = context.get_decode_slots_and_mask(block_size, q.device)
+    
+    k_batched = k_cache[slots].transpose(1, 2)  # (num_seqs, num_kv_heads, max_len, head_dim)
+    v_batched = v_cache[slots].transpose(1, 2)  # (num_seqs, num_kv_heads, max_len, head_dim)
+    
+    qi = q.unsqueeze(2)  # (num_seqs, num_heads, 1, head_dim)
+    
+    ki = repeat_kv(k_batched, qi.size(1))
+    vi = repeat_kv(v_batched, qi.size(1))
+    
+    out = F.scaled_dot_product_attention(qi, ki, vi, attn_mask=mask, scale=scale)
+    return out.squeeze(2)
 
 
 class Attention(nn.Module):
@@ -65,17 +76,11 @@ class Attention(nn.Module):
         if k_cache.numel() and v_cache.numel():
             store_kvcache(k, v, k_cache, v_cache, context.slot_mapping)
             
-        # [Backend Analogy]: FlashAttention 是目前最高效的注意力加速库。
-        # 这里区分了 prefill (一次性计算大量新 token) 和 decode (每次只增加一个 token)。
         if context.is_prefill:
             if context.block_tables is not None:    # prefix cache
-                k, v = k_cache, v_cache
-            o = flash_attn_varlen_func(q, k, v,
-                                       max_seqlen_q=context.max_seqlen_q, cu_seqlens_q=context.cu_seqlens_q,
-                                       max_seqlen_k=context.max_seqlen_k, cu_seqlens_k=context.cu_seqlens_k,
-                                       softmax_scale=self.scale, causal=True, block_table=context.block_tables)
+                o = paged_attention(q, k_cache, v_cache, context, self.scale)
+            else:
+                o = varlen_attention(q, k, v, context, self.scale)
         else:    # decode
-            o = flash_attn_with_kvcache(q.unsqueeze(1), k_cache, v_cache,
-                                        cache_seqlens=context.context_lens, block_table=context.block_tables, 
-                                        softmax_scale=self.scale, causal=True)
+            o = paged_attention(q, k_cache, v_cache, context, self.scale)
         return o

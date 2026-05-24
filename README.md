@@ -14,21 +14,21 @@ A lightweight vLLM implementation built from scratch.
 
 * 🚀 **Fast offline inference** - Comparable inference speeds to vLLM
 * 📖 **Readable codebase** - Clean implementation in ~ 1,200 lines of Python code
-* ⚡ **Optimization Suite** - Prefix caching, Tensor Parallelism, Torch compilation, CUDA graph, etc.
+* ⚡ **Optimization Suite** - Prefix caching, continuous batching, unified-memory KV cache, MPS eager execution.
 
 ## Installation
 
 ```bash
-pip install git+https://github.com/GeeeekExplorer/nano-vllm.git
+conda env create -f environment-mps.yml
+conda activate nano-vllm-mps
+pip install -e .
 ```
 
 ## Model Download
 
 To download the model weights manually, use the following command:
 ```bash
-huggingface-cli download --resume-download Qwen/Qwen3-0.6B \
-  --local-dir ~/huggingface/Qwen3-0.6B/ \
-  --local-dir-use-symlinks False
+hf download Qwen/Qwen3-0.6B --local-dir ~/huggingface/Qwen3-0.6B/
 ```
 
 ## Quick Start
@@ -36,8 +36,8 @@ huggingface-cli download --resume-download Qwen/Qwen3-0.6B \
 See `example.py` for usage. The API mirrors vLLM's interface with minor differences in the `LLM.generate` method:
 ```python
 from nanovllm import LLM, SamplingParams
-llm = LLM("/YOUR/MODEL/PATH", enforce_eager=True, tensor_parallel_size=1)
-sampling_params = SamplingParams(temperature=0.6, max_tokens=256)
+llm = LLM("/YOUR/MODEL/PATH", enforce_eager=True)
+sampling_params = SamplingParams(temperature=0.6, max_tokens=32)
 prompts = ["Hello, Nano-vLLM."]
 outputs = llm.generate(prompts, sampling_params)
 outputs[0]["text"]
@@ -47,18 +47,7 @@ outputs[0]["text"]
 
 See `bench.py` for benchmark.
 
-**Test Configuration:**
-- Hardware: RTX 4070 Laptop (8GB)
-- Model: Qwen3-0.6B
-- Total Requests: 256 sequences
-- Input Length: Randomly sampled between 100–1024 tokens
-- Output Length: Randomly sampled between 100–1024 tokens
-
-**Performance Results:**
-| Inference Engine | Output Tokens | Time (s) | Throughput (tokens/s) |
-|----------------|-------------|----------|-----------------------|
-| vLLM           | 133,966     | 98.37    | 1361.84               |
-| Nano-vLLM      | 133,966     | 93.41    | 1434.13               |
+The MPS branch prioritizes Apple Metal compatibility and code readability. Benchmark results depend on Apple Silicon model, unified-memory capacity, prompt length, and batch size.
 
 
 ## Star History
