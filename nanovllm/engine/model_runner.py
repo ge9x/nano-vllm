@@ -15,13 +15,17 @@ from nanovllm.utils.loader import load_model
 class ModelRunner:
 
     def __init__(self, config: Config, rank: int, event: Event | list[Event]):
+        """
+        初始化 ModelRunner。
+        rank==0 的进程负责主控与共享内存写入，其它 rank 为 worker。
+        """
         self.config = config
         hf_config = config.hf_config
         self.block_size = config.kvcache_block_size
         self.enforce_eager = config.enforce_eager
-        self.world_size = config.tensor_parallel_size
-        self.rank = rank
-        self.event = event
+        self.world_size = config.tensor_parallel_size # 多 GPU 数量
+        self.rank = rank # 当前 runner 进程的 GPU id
+        self.event = event # 用于多进程间同步的 Event（或 Event 列表，rank0 写入时通知其它进程）。
 
         # [Backend Analogy]: 类似于微服务间的 RPC 初始化。
         # 使用 NCCL 后端建立进程间通信群组，这样多张 GPU 之间就可以进行 All-Reduce 等数据同步。
@@ -52,6 +56,12 @@ class ModelRunner:
                 self.loop()  # 子进程进入事件循环，类似 Worker 进程挂起等待任务
 
     def exit(self):
+        """
+        清理并优雅退出 ModelRunner。
+
+        行为：关闭共享内存与进程组、销毁 CUDA Graph（若存在），并同步设备。
+        该方法会在程序退出或需要关闭子进程时被调用。
+        """
         if self.world_size > 1:
             self.shm.close()
             dist.barrier()
@@ -63,6 +73,12 @@ class ModelRunner:
         dist.destroy_process_group()
 
     def loop(self):
+        """
+        子进程事件循环（仅在 world_size>1 且 rank>0 时运行）。
+
+        从共享内存读取主进程通过 `write_shm` 写入的命令，并调用对应方法；
+        当接收到 "exit" 命令时跳出循环并结束进程循环。
+        """
         while True:
             method_name, args = self.read_shm()
             self.call(method_name, *args)
@@ -70,6 +86,12 @@ class ModelRunner:
                 break
 
     def read_shm(self):
+        """
+        从共享内存读取一个命令（子进程侧）。
+
+        返回：`(method_name, args)`。此方法会等待 `event` 被主进程触发。
+        仅在 multi-process 模式下由 worker 调用。
+        """
         assert self.world_size > 1 and self.rank > 0
         self.event.wait()
         n = int.from_bytes(self.shm.buf[0:4], "little")
@@ -78,6 +100,11 @@ class ModelRunner:
         return method_name, args
 
     def write_shm(self, method_name, *args):
+        """
+        将命令写入共享内存(shm, SharedMemory)并通知 worker（主进程侧）。
+
+        用于在多 GPU/多进程场景下把 `call` 请求从 rank0 广播给其它进程执行。
+        """
         assert self.world_size > 1 and self.rank == 0
         data = pickle.dumps([method_name, *args])
         n = len(data)
@@ -87,12 +114,23 @@ class ModelRunner:
             event.set()
 
     def call(self, method_name, *args):
+        """
+        对外的统一调用入口。
+
+        - 如果是 rank0 且启用了多进程，会先把命令写入共享内存以通知 worker；
+        - 随后在本进程直接调用对应方法并返回结果。
+        """
         if self.world_size > 1 and self.rank == 0:
             self.write_shm(method_name, *args)
-        method = getattr(self, method_name, None)
+        method = getattr(self, method_name, None) # 反射获取方法
         return method(*args)
 
     def warmup_model(self):
+        """
+        用占位输入对模型做一次 warmup，准备 CUDA 相关状态并检查内存。
+
+        作用：避免首次真实推理时出现延迟峰值，顺便用一次 prefill 路径跑通模型与 KV cache。
+        """
         torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats()
         max_num_batched_tokens, max_model_len = self.config.max_num_batched_tokens, self.config.max_model_len
@@ -105,6 +143,12 @@ class ModelRunner:
         torch.cuda.empty_cache()
 
     def allocate_kv_cache(self):
+        """
+        根据当前 GPU 显存预分配 KV cache 的静态内存池。
+
+        计算每个 block 占用字节数，根据 `gpu_memory_utilization` 与当前显存状况计算可用 block 数，
+        然后一次性 `torch.empty` 申请连续 tensor 并将每层的 k/v cache 指向该内存切片。
+        """
         config = self.config
         hf_config = config.hf_config
         free, total = torch.cuda.mem_get_info()
@@ -128,18 +172,28 @@ class ModelRunner:
                 layer_id += 1
 
     def prepare_block_tables(self, seqs: list[Sequence]):
+        """
+        构造并返回用于模型输入的 `block_tables` 张量（每个 seq 的 block_id 表，短的用 -1 填充）。
+
+        返回值：CUDA 上的 int32 张量，形状为 (bs, max_num_blocks)。
+        """
         max_len = max(len(seq.block_table) for seq in seqs)
         block_tables = [seq.block_table + [-1] * (max_len - len(seq.block_table)) for seq in seqs]
         block_tables = torch.tensor(block_tables, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
         return block_tables
 
     def prepare_prefill(self, seqs: list[Sequence]):
-        input_ids = []
-        positions = []
-        cu_seqlens_q = [0]
+        """
+        为 prefill 路径构建模型输入张量与上下文（包括 cu_seqlens、positions、slot_mapping、block_tables）。
+
+        返回：`input_ids, positions`（均为 CUDA 张量），并通过 `set_context` 把其它上下文数据注入到全局 context，供模型使用。
+        """
+        input_ids = [] # 所有序列本次要写入 KV 的 token，一维拼接后的 int64 张量
+        positions = [] # 每个 token 在其所属序列中的位置，一维拼接后的 int64 张量
+        cu_seqlens_q = [0] # 每个序列的 query（即本次 prefill 的 token）前缀长度的累积和，长度为 bs+1，用于 varlen attention 的索引
         cu_seqlens_k = [0]
-        max_seqlen_q = 0
-        max_seqlen_k = 0
+        max_seqlen_q = 0 # 本次 prefill 中最长的 query 序列长度（即最长的本次要写入 KV 的 token 数），用于模型前向时的动态维度裁剪
+        max_seqlen_k = 0 # 本次 prefill 中最长的 key 序列长度（即最长的该序列在 KV Cache 中的 token 数），用于模型前向时的动态维度裁剪
         slot_mapping = []
         block_tables = None
         for seq in seqs:
@@ -177,6 +231,11 @@ class ModelRunner:
         return input_ids, positions
 
     def prepare_decode(self, seqs: list[Sequence]):
+        """
+        为 decode 路径构建模型输入（每个 seq 只用最后一个 token 作为输入）。
+
+        返回：`input_ids, positions`（均为 CUDA 张量），并通过 `set_context` 注入 slot_mapping、context_lens 与 block_tables。
+        """
         input_ids = []
         positions = []
         slot_mapping = []
@@ -195,12 +254,24 @@ class ModelRunner:
         return input_ids, positions
 
     def prepare_sample(self, seqs: list[Sequence]):
+        """
+        为采样器准备 tensor（当前只包含每条序列的 temperature）。
+
+        返回：CUDA 上的 float32 温度向量。
+        """
         temperatures = [seq.temperature for seq in seqs]
         temperatures = torch.tensor(temperatures, dtype=torch.float32, pin_memory=True).cuda(non_blocking=True)
         return temperatures
 
     @torch.inference_mode()
     def run_model(self, input_ids: torch.Tensor, positions: torch.Tensor, is_prefill: bool):
+        """
+        执行模型前向。
+
+        - 对于 prefill、大 batch 或强制禁用 CUDA Graph 的情况，直接调用标准 forward；
+        - 否则使用预捕获的 CUDA Graph（通过 graph.replay()）以降低内核启动开销。
+        返回 logits 张量。
+        """
         if is_prefill or self.enforce_eager or input_ids.size(0) > 512:
             return self.model.compute_logits(self.model(input_ids, positions))
         else:
@@ -219,6 +290,15 @@ class ModelRunner:
             return self.model.compute_logits(graph_vars["outputs"][:bs])
 
     def run(self, seqs: list[Sequence], is_prefill: bool) -> list[int]:
+        """
+        运行一次完整的推理流程（prepare -> run_model -> sample -> reset_context）。
+
+        参数：
+        - seqs: 待处理的 Sequence 列表（prefill 或 decode 场景）。
+        - is_prefill: 是否为 prefill 路径。
+
+        返回：一个 Python 列表，包含每条序列本次生成的 token id（仅在 rank0 返回实际值，其它 rank 返回 None）。
+        """
         input_ids, positions = self.prepare_prefill(seqs) if is_prefill else self.prepare_decode(seqs)
         temperatures = self.prepare_sample(seqs) if self.rank == 0 else None
         logits = self.run_model(input_ids, positions, is_prefill)

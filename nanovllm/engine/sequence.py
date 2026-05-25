@@ -23,10 +23,10 @@ class Sequence:
         self.status = SequenceStatus.WAITING
         self.token_ids = copy(token_ids)
         self.last_token = token_ids[-1]
-        self.num_tokens = len(self.token_ids)
-        self.num_prompt_tokens = len(token_ids)
-        self.num_cached_tokens = 0
-        self.num_scheduled_tokens = 0
+        self.num_tokens = len(self.token_ids) # 当前请求的 token 数 (包括 prompt 和生成的 completion)
+        self.num_prompt_tokens = len(token_ids) # prompt token 数 (不变)
+        self.num_cached_tokens = 0 # prefill 阶段已经调度过的 token 数 (即已填入 KV Cache 的 token 数)
+        self.num_scheduled_tokens = 0 # 本次调度计划生成的 token 数
         self.is_prefill = True
         
         # [Backend Analogy]: 页表 (Page Table)。
@@ -58,6 +58,7 @@ class Sequence:
     def completion_token_ids(self):
         return self.token_ids[self.num_prompt_tokens:]
 
+    # [Backend Analogy]: 类似于操作系统中的内存页 (Memory Page)，每个 Block 管理 block_size 个 token。
     @property
     def num_blocks(self):
         return (self.num_tokens + self.block_size - 1) // self.block_size

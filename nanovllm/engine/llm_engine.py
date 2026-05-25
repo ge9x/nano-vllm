@@ -78,27 +78,47 @@ class LLMEngine:
         use_tqdm: bool = True,
     ) -> list[str]:
         pbar = tqdm(total=len(prompts), desc="Generating", dynamic_ncols=True, disable=not use_tqdm)
+
+        # 如果只传入单个 SamplingParams，复制为与 prompts 等长，便于 zip 配对
         if not isinstance(sampling_params, list):
             sampling_params = [sampling_params] * len(prompts)
+
+        # 将每个输入封装为 Sequence 并提交给调度器（异步等待执行）
         for prompt, sp in zip(prompts, sampling_params):
             self.add_request(prompt, sp)
-        outputs = {}
+
+        outputs = {}  # 临时映射：seq_id -> 生成的 token ids
         prefill_throughput = decode_throughput = 0.
+
+        # 主循环：不断调用 step() 驱动调度与模型执行，直到所有请求完成
         while not self.is_finished():
             t = perf_counter()
             output, num_tokens = self.step()
+
+            # 根据 num_tokens 的正负判断当前步骤为 prefill 还是 decode，并计算吞吐率
             if num_tokens > 0:
+                # prefill 阶段（向模型输入上下文、填充 K/V 缓存）
                 prefill_throughput = num_tokens / (perf_counter() - t)
             else:
+                # decode 阶段（模型生成新 token）
                 decode_throughput = -num_tokens / (perf_counter() - t)
+
+            # 在进度条上显示吞吐率，帮助调试与性能分析
             pbar.set_postfix({
                 "Prefill": f"{int(prefill_throughput)}tok/s",
                 "Decode": f"{int(decode_throughput)}tok/s",
             })
+
+            # 处理本次 step() 返回的已完成请求，将结果记入 outputs 并更新进度条
             for seq_id, token_ids in output:
                 outputs[seq_id] = token_ids
                 pbar.update(1)
+
         pbar.close()
+
+        # 按 seq_id 的升序恢复为与输入顺序一致的列表
         outputs = [outputs[seq_id] for seq_id in sorted(outputs.keys())]
+
+        # 将 token ids 解码为字符串并返回包含文本与 token ids 的 dict 列表
         outputs = [{"text": self.tokenizer.decode(token_ids), "token_ids": token_ids} for token_ids in outputs]
         return outputs

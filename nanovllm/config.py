@@ -20,6 +20,7 @@ class Config:
     enforce_eager: bool = False
     hf_config: AutoConfig | None = None
     eos: int = -1
+    # 每个 Block 管理的 token 数量 (KV cache 的块大小)，必须是 256 的倍数以兼容 Triton 的向量化指令
     kvcache_block_size: int = 256
     num_kvcache_blocks: int = -1
 
